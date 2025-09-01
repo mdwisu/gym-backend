@@ -32,6 +32,8 @@ model Member {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
+  transactions   Transaction[]
+
   @@map("members")
 }
 
@@ -44,5 +46,37 @@ model MembershipPackage {
   isActive        Boolean @default(true) @map("is_active")
   createdAt       DateTime @default(now()) @map("created_at")
 
+  transactions    Transaction[]
+
   @@map("membership_packages")
+}
+
+model PaymentMethod {
+  id           Int      @id @default(autoincrement())
+  name         String   @unique
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  transactions Transaction[]
+
+  @@map("payment_methods")
+}
+
+model Transaction {
+  id              Int           @id @default(autoincrement())
+  memberId        Int           @map("member_id")
+  packageId       Int           @map("package_id")
+  paymentMethodId Int           @map("payment_method_id")
+  amount          Float
+  packageName     String        @map("package_name")
+  packageDuration Int           @map("package_duration")
+  transactionDate DateTime      @default(now()) @map("transaction_date")
+  notes           String?
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  member          Member         @relation(fields: [memberId], references: [id])
+  package         MembershipPackage @relation(fields: [packageId], references: [id])
+  paymentMethod   PaymentMethod  @relation(fields: [paymentMethodId], references: [id])
+
+  @@map("transactions")
 }

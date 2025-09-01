@@ -35,6 +35,24 @@ async function initializeDatabase() {
       });
       console.log('✅ Default membership packages created');
     }
+
+    // Check if payment methods exist
+    const paymentMethodCount = await prisma.paymentMethod.count();
+    
+    if (paymentMethodCount === 0) {
+      const paymentMethods = [
+        { name: 'Cash' },
+        { name: 'Transfer Bank' },
+        { name: 'E-Wallet' },
+        { name: 'Debit Card' },
+        { name: 'Credit Card' }
+      ];
+
+      await prisma.paymentMethod.createMany({
+        data: paymentMethods
+      });
+      console.log('✅ Default payment methods created');
+    }
     
     console.log('✅ Database initialized successfully');
   } catch (error) {

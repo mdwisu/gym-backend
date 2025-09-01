@@ -352,6 +352,111 @@ app.delete('/api/members/:id', async (req, res) => {
   }
 });
 
+// Member Renewal Route - All-in-One
+app.post('/api/members/:id/renew', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { packageId, paymentMethodId, amount, notes, customPrice } = req.body;
+
+    if (!packageId || !paymentMethodId) {
+      return res.status(400).json({ 
+        error: 'Required fields: packageId, paymentMethodId' 
+      });
+    }
+
+    // Get member
+    const member = await prisma.member.findUnique({
+      where: { id: parseInt(id) }
+    });
+
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    // Get package details
+    const membershipPackage = await prisma.membershipPackage.findUnique({
+      where: { id: parseInt(packageId) }
+    });
+
+    if (!membershipPackage) {
+      return res.status(404).json({ error: 'Package not found' });
+    }
+
+    // Check payment method exists
+    const paymentMethod = await prisma.paymentMethod.findUnique({
+      where: { id: parseInt(paymentMethodId) }
+    });
+
+    if (!paymentMethod) {
+      return res.status(404).json({ error: 'Payment method not found' });
+    }
+
+    // Calculate new dates
+    const now = new Date();
+    const currentEndDate = new Date(member.endDate);
+    
+    // If current membership is not expired, extend from current end date
+    // If expired, start from today
+    const newStartDate = currentEndDate > now ? currentEndDate : now;
+    const newEndDate = new Date(newStartDate);
+    newEndDate.setMonth(newEndDate.getMonth() + membershipPackage.durationMonths);
+
+    // Determine amount (use custom price if provided, otherwise package price)
+    const finalAmount = customPrice ? parseFloat(customPrice) : 
+                       amount ? parseFloat(amount) : 
+                       membershipPackage.price;
+
+    // Start transaction
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Create transaction record
+      const transaction = await tx.transaction.create({
+        data: {
+          memberId: parseInt(id),
+          packageId: parseInt(packageId),
+          paymentMethodId: parseInt(paymentMethodId),
+          amount: finalAmount,
+          packageName: membershipPackage.name,
+          packageDuration: membershipPackage.durationMonths,
+          notes: notes || `Membership renewal - ${membershipPackage.name}`
+        },
+        include: {
+          member: { select: { id: true, name: true, phone: true } },
+          package: { select: { id: true, name: true, durationMonths: true } },
+          paymentMethod: { select: { id: true, name: true } }
+        }
+      });
+
+      // 2. Update member with new package and dates
+      const updatedMember = await tx.member.update({
+        where: { id: parseInt(id) },
+        data: {
+          membershipType: membershipPackage.name,
+          startDate: newStartDate,
+          endDate: newEndDate,
+          isActive: true
+        }
+      });
+
+      return { transaction, member: updatedMember };
+    });
+
+    res.json({
+      message: 'Membership renewed successfully',
+      transaction: result.transaction,
+      member: result.member,
+      renewalDetails: {
+        previousEndDate: member.endDate,
+        newStartDate: newStartDate,
+        newEndDate: newEndDate,
+        extensionDays: Math.ceil((newEndDate - new Date(member.endDate)) / (1000 * 60 * 60 * 24))
+      }
+    });
+  } catch (error) {
+    console.error('Member renewal error:', error);
+    res.status(500).json({ error: 'Failed to renew membership' });
+  }
+});
+
 // Package Routes
 app.get('/api/packages', async (req, res) => {
   try {
@@ -363,6 +468,442 @@ app.get('/api/packages', async (req, res) => {
   } catch (error) {
     console.error('Get packages error:', error);
     res.status(500).json({ error: 'Failed to fetch packages' });
+  }
+});
+
+app.post('/api/packages', authenticateToken, async (req, res) => {
+  try {
+    const { name, durationMonths, price, description } = req.body;
+
+    if (!name || !durationMonths || !price) {
+      return res.status(400).json({ 
+        error: 'Required fields: name, durationMonths, price' 
+      });
+    }
+
+    const membershipPackage = await prisma.membershipPackage.create({
+      data: {
+        name: name.trim(),
+        durationMonths: parseInt(durationMonths),
+        price: parseFloat(price),
+        description: description?.trim() || null
+      }
+    });
+
+    res.status(201).json({
+      message: 'Package created successfully',
+      package: membershipPackage
+    });
+  } catch (error) {
+    console.error('Create package error:', error);
+    res.status(500).json({ error: 'Failed to create package' });
+  }
+});
+
+app.put('/api/packages/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, durationMonths, price, description, isActive } = req.body;
+
+    if (!name || !durationMonths || !price) {
+      return res.status(400).json({ 
+        error: 'Required fields: name, durationMonths, price' 
+      });
+    }
+
+    const membershipPackage = await prisma.membershipPackage.update({
+      where: { id: parseInt(id) },
+      data: {
+        name: name.trim(),
+        durationMonths: parseInt(durationMonths),
+        price: parseFloat(price),
+        description: description?.trim() || null,
+        isActive: isActive !== undefined ? isActive : true
+      }
+    });
+
+    res.json({
+      message: 'Package updated successfully',
+      package: membershipPackage
+    });
+  } catch (error) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Package not found' });
+    }
+    console.error('Update package error:', error);
+    res.status(500).json({ error: 'Failed to update package' });
+  }
+});
+
+app.delete('/api/packages/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check if package is used in any transactions
+    const transactionCount = await prisma.transaction.count({
+      where: { packageId: parseInt(id) }
+    });
+
+    if (transactionCount > 0) {
+      // Don't delete, just deactivate
+      await prisma.membershipPackage.update({
+        where: { id: parseInt(id) },
+        data: { isActive: false }
+      });
+      
+      return res.json({ 
+        message: 'Package deactivated (cannot delete as it has transaction history)' 
+      });
+    }
+
+    // Safe to delete if no transactions
+    await prisma.membershipPackage.delete({
+      where: { id: parseInt(id) }
+    });
+
+    res.json({ message: 'Package deleted successfully' });
+  } catch (error) {
+    if (error.code === 'P2025') {
+      return res.status(404).json({ error: 'Package not found' });
+    }
+    console.error('Delete package error:', error);
+    res.status(500).json({ error: 'Failed to delete package' });
+  }
+});
+
+// Payment Method Routes
+app.get('/api/payment-methods', authenticateToken, async (req, res) => {
+  try {
+    const paymentMethods = await prisma.paymentMethod.findMany({
+      where: { isActive: true },
+      orderBy: { name: 'asc' }
+    });
+    res.json(paymentMethods);
+  } catch (error) {
+    console.error('Get payment methods error:', error);
+    res.status(500).json({ error: 'Failed to fetch payment methods' });
+  }
+});
+
+// Transaction Routes
+app.get('/api/transactions', authenticateToken, async (req, res) => {
+  try {
+    const { page = 1, limit = 50, memberId } = req.query;
+    const skip = (page - 1) * limit;
+
+    let whereClause = {};
+    if (memberId) {
+      whereClause.memberId = parseInt(memberId);
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where: whereClause,
+      include: {
+        member: { select: { id: true, name: true, phone: true } },
+        paymentMethod: { select: { id: true, name: true } }
+      },
+      orderBy: { transactionDate: 'desc' },
+      skip: parseInt(skip),
+      take: parseInt(limit)
+    });
+
+    const total = await prisma.transaction.count({ where: whereClause });
+
+    res.json({
+      transactions,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total,
+        pages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    console.error('Get transactions error:', error);
+    res.status(500).json({ error: 'Failed to fetch transactions' });
+  }
+});
+
+app.post('/api/transactions', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      memberId, 
+      packageId, 
+      paymentMethodId, 
+      amount, 
+      notes,
+      transactionDate = new Date()
+    } = req.body;
+
+    if (!memberId || !packageId || !paymentMethodId || !amount) {
+      return res.status(400).json({ 
+        error: 'Required fields: memberId, packageId, paymentMethodId, amount' 
+      });
+    }
+
+    // Get package details to store in transaction
+    const membershipPackage = await prisma.membershipPackage.findUnique({
+      where: { id: parseInt(packageId) }
+    });
+
+    if (!membershipPackage) {
+      return res.status(404).json({ error: 'Package not found' });
+    }
+
+    // Check if member exists
+    const member = await prisma.member.findUnique({
+      where: { id: parseInt(memberId) }
+    });
+
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    // Check if payment method exists
+    const paymentMethod = await prisma.paymentMethod.findUnique({
+      where: { id: parseInt(paymentMethodId) }
+    });
+
+    if (!paymentMethod) {
+      return res.status(404).json({ error: 'Payment method not found' });
+    }
+
+    // Create transaction
+    const transaction = await prisma.transaction.create({
+      data: {
+        memberId: parseInt(memberId),
+        packageId: parseInt(packageId),
+        paymentMethodId: parseInt(paymentMethodId),
+        amount: parseFloat(amount),
+        packageName: membershipPackage.name,
+        packageDuration: membershipPackage.durationMonths,
+        transactionDate: new Date(transactionDate),
+        notes: notes || null
+      },
+      include: {
+        member: { select: { id: true, name: true, phone: true } },
+        package: { select: { id: true, name: true, durationMonths: true } },
+        paymentMethod: { select: { id: true, name: true } }
+      }
+    });
+
+    res.status(201).json({
+      message: 'Transaction recorded successfully',
+      transaction
+    });
+  } catch (error) {
+    console.error('Create transaction error:', error);
+    res.status(500).json({ error: 'Failed to record transaction' });
+  }
+});
+
+// Financial Reports Routes
+app.get('/api/reports/monthly', authenticateToken, async (req, res) => {
+  try {
+    const { year = new Date().getFullYear(), month = new Date().getMonth() + 1 } = req.query;
+    
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0, 23, 59, 59);
+
+    // Total revenue for the month
+    const monthlyRevenue = await prisma.transaction.aggregate({
+      where: {
+        transactionDate: {
+          gte: startDate,
+          lte: endDate
+        }
+      },
+      _sum: { amount: true },
+      _count: { id: true }
+    });
+
+    // Revenue by package type
+    const revenueByPackage = await prisma.transaction.groupBy({
+      by: ['packageName', 'packageDuration'],
+      where: {
+        transactionDate: {
+          gte: startDate,
+          lte: endDate
+        }
+      },
+      _sum: { amount: true },
+      _count: { id: true },
+      orderBy: { _sum: { amount: 'desc' } }
+    });
+
+    // Revenue by payment method
+    const revenueByPaymentMethod = await prisma.transaction.groupBy({
+      by: ['paymentMethodId'],
+      where: {
+        transactionDate: {
+          gte: startDate,
+          lte: endDate
+        }
+      },
+      _sum: { amount: true },
+      _count: { id: true },
+      orderBy: { _sum: { amount: 'desc' } }
+    });
+
+    // Get payment method names
+    const paymentMethodsData = await Promise.all(
+      revenueByPaymentMethod.map(async (item) => {
+        const paymentMethod = await prisma.paymentMethod.findUnique({
+          where: { id: item.paymentMethodId }
+        });
+        return {
+          ...item,
+          paymentMethodName: paymentMethod?.name || 'Unknown'
+        };
+      })
+    );
+
+    // New members this month
+    const newMembersCount = await prisma.member.count({
+      where: {
+        createdAt: {
+          gte: startDate,
+          lte: endDate
+        }
+      }
+    });
+
+    res.json({
+      period: `${year}-${month.toString().padStart(2, '0')}`,
+      totalRevenue: monthlyRevenue._sum.amount || 0,
+      totalTransactions: monthlyRevenue._count.id || 0,
+      newMembers: newMembersCount,
+      revenueByPackage: revenueByPackage.map(item => ({
+        packageName: item.packageName,
+        duration: item.packageDuration,
+        revenue: item._sum.amount || 0,
+        count: item._count.id || 0
+      })),
+      revenueByPaymentMethod: paymentMethodsData.map(item => ({
+        paymentMethod: item.paymentMethodName,
+        revenue: item._sum.amount || 0,
+        count: item._count.id || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Monthly report error:', error);
+    res.status(500).json({ error: 'Failed to generate monthly report' });
+  }
+});
+
+app.get('/api/reports/revenue', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      startDate, 
+      endDate, 
+      period = 'daily' // daily, weekly, monthly
+    } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    // Revenue data based on period
+    let groupBy = {};
+    if (period === 'daily') {
+      groupBy = {
+        by: ['transactionDate'],
+        where: {
+          transactionDate: {
+            gte: start,
+            lte: end
+          }
+        },
+        _sum: { amount: true },
+        _count: { id: true },
+        orderBy: { transactionDate: 'asc' }
+      };
+    }
+
+    const revenueData = await prisma.transaction.groupBy(groupBy);
+
+    // Total for the period
+    const totalRevenue = await prisma.transaction.aggregate({
+      where: {
+        transactionDate: {
+          gte: start,
+          lte: end
+        }
+      },
+      _sum: { amount: true },
+      _count: { id: true }
+    });
+
+    res.json({
+      period: { startDate, endDate },
+      totalRevenue: totalRevenue._sum.amount || 0,
+      totalTransactions: totalRevenue._count.id || 0,
+      revenueData: revenueData.map(item => ({
+        date: item.transactionDate,
+        revenue: item._sum.amount || 0,
+        count: item._count.id || 0
+      }))
+    });
+  } catch (error) {
+    console.error('Revenue report error:', error);
+    res.status(500).json({ error: 'Failed to generate revenue report' });
+  }
+});
+
+app.get('/api/reports/packages', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      startDate, 
+      endDate,
+      limit = 10
+    } = req.query;
+
+    let whereClause = {};
+    if (startDate && endDate) {
+      whereClause.transactionDate = {
+        gte: new Date(startDate),
+        lte: new Date(endDate)
+      };
+    }
+
+    // Package performance
+    const packagePerformance = await prisma.transaction.groupBy({
+      by: ['packageId', 'packageName', 'packageDuration'],
+      where: whereClause,
+      _sum: { amount: true },
+      _count: { id: true },
+      orderBy: { _sum: { amount: 'desc' } },
+      take: parseInt(limit)
+    });
+
+    // Get package details
+    const packageData = await Promise.all(
+      packagePerformance.map(async (item) => {
+        const packageInfo = await prisma.membershipPackage.findUnique({
+          where: { id: item.packageId }
+        });
+        return {
+          packageId: item.packageId,
+          packageName: item.packageName,
+          duration: item.packageDuration,
+          currentPrice: packageInfo?.price || 0,
+          totalRevenue: item._sum.amount || 0,
+          totalSold: item._count.id || 0,
+          averagePrice: (item._count.id || 0) > 0 ? (item._sum.amount || 0) / (item._count.id || 0) : 0
+        };
+      })
+    );
+
+    res.json({
+      period: startDate && endDate ? { startDate, endDate } : 'all-time',
+      packages: packageData
+    });
+  } catch (error) {
+    console.error('Package report error:', error);
+    res.status(500).json({ error: 'Failed to generate package report' });
   }
 });
 
