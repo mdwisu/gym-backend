@@ -246,9 +246,34 @@ app.use('/api/packages', authenticateToken);
 // Member Routes
 app.get('/api/members', async (req, res) => {
   try {
+    const { page = 1, limit = 10, search = '', status = '' } = req.query;
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    // Build where clause
+    let whereClause = { isActive: true };
+
+    // Add search filter
+    if (search) {
+      whereClause.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { phone: { contains: search } },
+        { email: { contains: search, mode: 'insensitive' } }
+      ];
+    }
+
+    // Get total count
+    const totalMembers = await prisma.member.count({
+      where: whereClause
+    });
+
+    // Get paginated members
     const members = await prisma.member.findMany({
-      where: { isActive: true },
-      orderBy: { createdAt: 'desc' }
+      where: whereClause,
+      orderBy: { createdAt: 'desc' },
+      skip: offset,
+      take: limitNum
     });
 
     const now = new Date();
@@ -259,8 +284,26 @@ app.get('/api/members', async (req, res) => {
       status: member.endDate < now ? 'expired' : 
               member.endDate <= sevenDaysFromNow ? 'expiring_soon' : 'active'
     }));
+
+    // Filter by status if provided
+    let filteredMembers = membersWithStatus;
+    if (status) {
+      filteredMembers = membersWithStatus.filter(member => member.status === status);
+    }
+
+    const totalPages = Math.ceil(totalMembers / limitNum);
     
-    res.json(membersWithStatus);
+    res.json({
+      members: filteredMembers,
+      pagination: {
+        currentPage: pageNum,
+        totalPages: totalPages,
+        totalMembers: totalMembers,
+        limit: limitNum,
+        hasNextPage: pageNum < totalPages,
+        hasPreviousPage: pageNum > 1
+      }
+    });
   } catch (error) {
     console.error('Get members error:', error);
     res.status(500).json({ error: 'Failed to fetch members' });
