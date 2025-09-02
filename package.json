@@ -9,7 +9,13 @@
     "dev": "nodemon app.js",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "db:seed": "node prisma/seed.js",
+    "seed": "node prisma/seed.js",
+    "db:reset": "prisma db push --force-reset && npm run seed"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
   },
   "keywords": ["gym", "member", "management", "api", "express", "prisma"],
   "author": "Gym App",

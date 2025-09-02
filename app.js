@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const { prisma, initializeDatabase } = require('./prisma');
+const { prisma } = require('./prisma');
 const { authenticateToken } = require('./middleware/auth');
 
 const app = express();
@@ -314,13 +314,19 @@ app.post('/api/members', async (req, res) => {
   try {
     const { name, phone, email, membership_type, start_date, duration_months, notes } = req.body;
 
-    if (!name || !membership_type || !start_date || !duration_months) {
+    if (!name || !membership_type || !start_date || duration_months === undefined) {
       return res.status(400).json({ error: 'Required fields missing' });
     }
 
     const startDate = new Date(start_date);
     const endDate = new Date(startDate);
-    endDate.setMonth(endDate.getMonth() + parseInt(duration_months));
+    
+    // Handle Day Pass (duration_months = 0) - expires end of day
+    if (parseInt(duration_months) === 0) {
+      endDate.setHours(23, 59, 59, 999); // End of the same day
+    } else {
+      endDate.setMonth(endDate.getMonth() + parseInt(duration_months));
+    }
 
     const member = await prisma.member.create({
       data: {
@@ -982,9 +988,9 @@ app.get('/api/dashboard/stats', authenticateToken, async (req, res) => {
   }
 });
 
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`🚀 Backend server running on http://localhost:${PORT}`);
   console.log(`📊 API endpoint: http://localhost:${PORT}/api`);
   console.log(`🔐 Default login: admin / admin123`);
-  await initializeDatabase();
+  console.log(`🌱 Run "npm run seed" to seed the database`);
 });
