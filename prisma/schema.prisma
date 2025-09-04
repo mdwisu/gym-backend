@@ -32,7 +32,8 @@ model Member {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  transactions   Transaction[]
+  transactions      Transaction[]
+  membershipPeriods MembershipPeriod[]
 
   @@map("members")
 }
@@ -77,6 +78,24 @@ model Transaction {
   member          Member         @relation(fields: [memberId], references: [id])
   package         MembershipPackage @relation(fields: [packageId], references: [id])
   paymentMethod   PaymentMethod  @relation(fields: [paymentMethodId], references: [id])
+  membershipPeriod MembershipPeriod?
 
   @@map("transactions")
+}
+
+model MembershipPeriod {
+  id            Int       @id @default(autoincrement())
+  memberId      Int       @map("member_id")
+  startDate     DateTime  @map("start_date")
+  endDate       DateTime  @map("end_date")
+  packageName   String    @map("package_name")
+  duration      Int       // months
+  status        String    // "active", "expired", "canceled"
+  transactionId Int?      @unique @map("transaction_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  
+  member        Member       @relation(fields: [memberId], references: [id])
+  transaction   Transaction? @relation(fields: [transactionId], references: [id])
+  
+  @@map("membership_periods")
 }
