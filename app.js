@@ -251,24 +251,45 @@ app.get('/api/members', async (req, res) => {
     const limitNum = parseInt(limit);
     const offset = (pageNum - 1) * limitNum;
 
-    // Build where clause
+    // Build where clause for basic filters
     let whereClause = { isActive: true };
 
-    // Add search filter
+    // Add search filter (SQLite doesn't support mode: 'insensitive')
     if (search) {
-      whereClause.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
+      const searchConditions = [
+        { name: { contains: search } },
         { phone: { contains: search } },
-        { email: { contains: search, mode: 'insensitive' } }
+        { email: { contains: search } }
       ];
+      
+      // If search term is numeric, also search by ID
+      if (!isNaN(search) && search.trim() !== '') {
+        searchConditions.push({ id: parseInt(search) });
+      }
+      
+      whereClause.OR = searchConditions;
     }
 
-    // Get total count
+    // Add status-based date filters
+    const now = new Date();
+    const sevenDaysFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+    if (status) {
+      if (status === 'expired') {
+        whereClause.endDate = { lt: now };
+      } else if (status === 'expiring_soon') {
+        whereClause.endDate = { gte: now, lte: sevenDaysFromNow };
+      } else if (status === 'active') {
+        whereClause.endDate = { gt: sevenDaysFromNow };
+      }
+    }
+
+    // Get total count with all filters applied
     const totalMembers = await prisma.member.count({
       where: whereClause
     });
 
-    // Get paginated members
+    // Get paginated members with all filters applied
     const members = await prisma.member.findMany({
       where: whereClause,
       orderBy: { createdAt: 'desc' },
@@ -276,25 +297,17 @@ app.get('/api/members', async (req, res) => {
       take: limitNum
     });
 
-    const now = new Date();
-    const sevenDaysFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
-
+    // Add status to each member for frontend display
     const membersWithStatus = members.map(member => ({
       ...member,
       status: member.endDate < now ? 'expired' : 
               member.endDate <= sevenDaysFromNow ? 'expiring_soon' : 'active'
     }));
 
-    // Filter by status if provided
-    let filteredMembers = membersWithStatus;
-    if (status) {
-      filteredMembers = membersWithStatus.filter(member => member.status === status);
-    }
-
     const totalPages = Math.ceil(totalMembers / limitNum);
     
     res.json({
-      members: filteredMembers,
+      members: membersWithStatus,
       pagination: {
         currentPage: pageNum,
         totalPages: totalPages,
