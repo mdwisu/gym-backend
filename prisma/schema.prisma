@@ -7,7 +7,7 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:../database/gym.db"
+  url      = "file:./database/gym.db"
 }
 
 model Admin {

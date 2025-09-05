@@ -35,7 +35,13 @@ function analyzeMembershipPattern(periods) {
   for (let i = 1; i < sortedPeriods.length; i++) {
     const prevEnd = new Date(sortedPeriods[i - 1].endDate);
     const currentStart = new Date(sortedPeriods[i].startDate);
-    const gapDays = Math.ceil((currentStart - prevEnd) / (1000 * 60 * 60 * 24));
+    
+    // Normalize to date only (ignore time) for gap calculation
+    const prevEndDate = new Date(prevEnd.getFullYear(), prevEnd.getMonth(), prevEnd.getDate());
+    const currentStartDate = new Date(currentStart.getFullYear(), currentStart.getMonth(), currentStart.getDate());
+    
+    // Calculate gap in calendar days
+    const gapDays = Math.ceil((currentStartDate - prevEndDate) / (1000 * 60 * 60 * 24)) - 1;
     
     if (gapDays > 0) {
       gaps.push({

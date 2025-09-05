@@ -116,9 +116,55 @@ router.post('/', async (req, res) => {
 
       if (member) {
         // Calculate period dates
-        const startDate = new Date(transactionDate);
-        const endDate = new Date(startDate);
-        endDate.setMonth(endDate.getMonth() + membershipPackage.durationMonths);
+        let startDate, endDate;
+        
+        if (membershipPackage.durationMonths === 0) {
+          // Day pass logic: extend from latest active membership or today
+          const allPeriods = await tx.membershipPeriod.findMany({
+            where: {
+              memberId: parseInt(memberId),
+              status: 'active'
+            },
+            orderBy: { endDate: 'desc' }
+          });
+
+          if (allPeriods.length > 0) {
+            // Find the absolute latest end date from all periods
+            const latestEndDate = allPeriods.reduce((latest, period) => {
+              const periodEnd = new Date(period.endDate);
+              return periodEnd > latest ? periodEnd : latest;
+            }, new Date(allPeriods[0].endDate));
+
+            // Start day pass from the day after the absolute latest end date
+            startDate = new Date(latestEndDate);
+            startDate.setDate(startDate.getDate() + 1);
+            startDate.setHours(0, 0, 0, 0);
+          } else {
+            // No periods found, use member's end date or today
+            const memberEndDate = new Date(member.endDate);
+            const today = new Date();
+            
+            if (memberEndDate > today) {
+              // Member still has active membership, start day pass after it ends
+              startDate = new Date(memberEndDate);
+              startDate.setDate(startDate.getDate() + 1);
+              startDate.setHours(0, 0, 0, 0);
+            } else {
+              // Member expired, start from today
+              startDate = new Date(transactionDate);
+              startDate.setHours(0, 0, 0, 0);
+            }
+          }
+          
+          // Day pass ends same day
+          endDate = new Date(startDate);
+          endDate.setHours(23, 59, 59, 999);
+        } else {
+          // Regular membership
+          startDate = new Date(transactionDate);
+          endDate = new Date(startDate);
+          endDate.setMonth(endDate.getMonth() + membershipPackage.durationMonths);
+        }
 
         // Create membership period
         await tx.membershipPeriod.create({

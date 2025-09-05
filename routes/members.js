@@ -63,11 +63,27 @@ router.get('/', async (req, res) => {
     });
 
     // Add status to each member for frontend display
-    const membersWithStatus = members.map(member => ({
-      ...member,
-      status: member.endDate < now ? 'expired' : 
-              member.endDate <= sevenDaysFromNow ? 'expiring_soon' : 'active'
-    }));
+    const membersWithStatus = members.map(member => {
+      let isExpired = false;
+      
+      // For Day Pass, check only the date (not time) - valid throughout the day
+      if (member.membershipType === 'Day Pass') {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const endDateOnly = new Date(member.endDate);
+        endDateOnly.setHours(0, 0, 0, 0);
+        isExpired = endDateOnly < today;
+      } else {
+        // For regular memberships, use exact time comparison
+        isExpired = member.endDate < now;
+      }
+      
+      return {
+        ...member,
+        status: isExpired ? 'expired' : 
+                member.endDate <= sevenDaysFromNow ? 'expiring_soon' : 'active'
+      };
+    });
 
     const totalPages = Math.ceil(totalMembers / limitNum);
     
@@ -154,8 +170,13 @@ router.post('/with-transaction', async (req, res) => {
       packageId, paymentMethodId, amount 
     } = req.body;
 
-    if (!name || !membership_type || !start_date || duration_months === undefined) {
+    if (!name || !membership_type || duration_months === undefined) {
       return res.status(400).json({ error: 'Required member fields missing' });
+    }
+    
+    // For Day Pass, start_date is optional (will be calculated)
+    if (parseInt(duration_months) !== 0 && !start_date) {
+      return res.status(400).json({ error: 'start_date required for regular memberships' });
     }
 
     if (!packageId || !paymentMethodId || !amount) {
@@ -171,13 +192,17 @@ router.post('/with-transaction', async (req, res) => {
       return res.status(404).json({ error: 'Package not found' });
     }
 
-    const startDate = new Date(start_date);
-    const endDate = new Date(startDate);
+    // For Day Pass, dates will be calculated later. For regular memberships, use provided start_date
+    let startDate, endDate;
     
-    // Handle Day Pass (duration_months = 0) - expires end of day
     if (parseInt(duration_months) === 0) {
-      endDate.setHours(23, 59, 59, 999); // End of the same day
+      // Day Pass - dates will be calculated in transaction based on existing membership
+      startDate = new Date(); // Temporary, will be recalculated
+      endDate = new Date(); // Temporary, will be recalculated
     } else {
+      // Regular membership - use provided start_date
+      startDate = new Date(start_date);
+      endDate = new Date(startDate);
       endDate.setMonth(endDate.getMonth() + parseInt(duration_months));
     }
 
@@ -196,16 +221,8 @@ router.post('/with-transaction', async (req, res) => {
         // For Day Pass with existing phone number, use existing member
         member = existingMember;
         
-        // For Day Pass, always start from today regardless of existing membership
-        const newStartDate = startDate;
-        const newEndDate = new Date(startDate);
-        newEndDate.setHours(23, 59, 59, 999); // End of the same day for Day Pass
-        
-        // Update member with new dates and info
+        // Update member data including dates (so frontend shows latest day pass dates)
         const updateData = {
-          membershipType: membership_type,
-          startDate: newStartDate,
-          endDate: newEndDate,
           isActive: true
         };
         
@@ -218,6 +235,7 @@ router.post('/with-transaction', async (req, res) => {
           updateData.notes = notes;
         }
         
+        // Update member with new day pass dates (will be calculated below)
         member = await tx.member.update({
           where: { id: member.id },
           data: updateData
@@ -254,17 +272,87 @@ router.post('/with-transaction', async (req, res) => {
       });
 
       // 3. Create membership period linked to transaction
+      // For day pass, extend from latest membership end date
+      let periodStartDate, periodEndDate;
+      
+      if (parseInt(duration_months) === 0) {
+        // Day pass logic: extend from latest membership period or today
+        if (existingMember) {
+          // Get ALL membership periods for this member (including today's day pass)
+          // to find the absolute latest end date
+          const allPeriods = await tx.membershipPeriod.findMany({
+            where: {
+              memberId: member.id
+              // Remove status filter to include today's day pass even if considered "expired"
+            },
+            orderBy: { endDate: 'desc' }
+          });
+
+          if (allPeriods.length > 0) {
+            // Find the absolute latest end date from all periods
+            const latestEndDate = allPeriods.reduce((latest, period) => {
+              const periodEnd = new Date(period.endDate);
+              return periodEnd > latest ? periodEnd : latest;
+            }, new Date(allPeriods[0].endDate));
+
+            // Start day pass from the day after the absolute latest end date
+            periodStartDate = new Date(latestEndDate);
+            periodStartDate.setDate(periodStartDate.getDate() + 1);
+            periodStartDate.setHours(0, 0, 0, 0);
+          } else {
+            // No periods found, use member's end date or today
+            const memberEndDate = new Date(member.endDate);
+            const today = new Date();
+            
+            if (memberEndDate > today) {
+              // Member still has active membership, start day pass after it ends
+              periodStartDate = new Date(memberEndDate);
+              periodStartDate.setDate(periodStartDate.getDate() + 1);
+              periodStartDate.setHours(0, 0, 0, 0);
+            } else {
+              // Member expired, start from today
+              periodStartDate = new Date();
+              periodStartDate.setHours(0, 0, 0, 0);
+            }
+          }
+        } else {
+          // New member, start from today
+          periodStartDate = new Date();
+          periodStartDate.setHours(0, 0, 0, 0);
+        }
+        
+        // Day pass ends same day
+        periodEndDate = new Date(periodStartDate);
+        periodEndDate.setHours(23, 59, 59, 999);
+      } else {
+        // Regular membership
+        periodStartDate = startDate;
+        periodEndDate = endDate;
+      }
+
       const membershipPeriod = await tx.membershipPeriod.create({
         data: {
           memberId: member.id,
-          startDate,
-          endDate,
+          startDate: periodStartDate,
+          endDate: periodEndDate,
           packageName: membership_type,
           duration: parseInt(duration_months),
           status: 'active',
           transactionId: transaction.id
         }
       });
+
+      // For Day Pass with existing member, update member record dates to show latest period
+      if (existingMember && parseInt(duration_months) === 0) {
+        member = await tx.member.update({
+          where: { id: member.id },
+          data: {
+            startDate: periodStartDate,
+            endDate: periodEndDate,
+            membershipType: membership_type
+          }
+        });
+      }
 
       return { member, transaction, membershipPeriod, isExistingMember: !!existingMember };
     });
@@ -485,12 +573,79 @@ router.post('/search', async (req, res) => {
     });
 
     const now = new Date();
-    const membersWithStatus = members.map(member => ({
-      ...member,
-      status: member.endDate < now ? 'expired' : 
-              member.endDate <= new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000) ? 'expiring_soon' : 'active',
-      daysRemaining: Math.ceil((new Date(member.endDate) - now) / (1000 * 60 * 60 * 24))
-    }));
+    
+    // Get membership periods for all members to calculate correct remaining days
+    const memberIds = members.map(m => m.id);
+    const membershipPeriods = await prisma.membershipPeriod.findMany({
+      where: {
+        memberId: { in: memberIds },
+        status: 'active',
+        endDate: { gt: now }
+      },
+      orderBy: { endDate: 'desc' }
+    });
+
+    // Group periods by member ID
+    const periodsGrouped = membershipPeriods.reduce((acc, period) => {
+      if (!acc[period.memberId]) acc[period.memberId] = [];
+      acc[period.memberId].push(period);
+      return acc;
+    }, {});
+
+    const membersWithStatus = members.map(member => {
+      const memberPeriods = periodsGrouped[member.id] || [];
+      
+      // Calculate total remaining days from all active periods
+      let totalRemainingDays = 0;
+      if (memberPeriods.length > 0) {
+        // Sort periods by start date to calculate continuous days
+        const sortedPeriods = memberPeriods.sort((a, b) => new Date(a.startDate) - new Date(b.startDate));
+        
+        // Calculate total days by summing all periods (handles consecutive periods)
+        let currentDate = now;
+        let totalDays = 0;
+        
+        for (const period of sortedPeriods) {
+          const periodStart = new Date(period.startDate);
+          const periodEnd = new Date(period.endDate);
+          
+          // If period hasn't started yet, count from start date
+          if (periodStart > currentDate) {
+            const daysInPeriod = Math.ceil((periodEnd - periodStart) / (1000 * 60 * 60 * 24)) + 1;
+            totalDays += daysInPeriod;
+          } else if (periodEnd > currentDate) {
+            // Period is active, count remaining days in this period
+            const daysInPeriod = Math.ceil((periodEnd - currentDate) / (1000 * 60 * 60 * 24));
+            totalDays += daysInPeriod;
+          }
+        }
+        
+        totalRemainingDays = totalDays;
+      } else {
+        // Fallback to member.endDate if no active periods found
+        totalRemainingDays = Math.ceil((new Date(member.endDate) - now) / (1000 * 60 * 60 * 24));
+      }
+      
+      // Check if expired with Day Pass logic
+      let isExpired = false;
+      if (member.membershipType === 'Day Pass') {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const endDateOnly = new Date(member.endDate);
+        endDateOnly.setHours(0, 0, 0, 0);
+        isExpired = endDateOnly < today;
+      } else {
+        isExpired = member.endDate < now && totalRemainingDays <= 0;
+      }
+      
+      return {
+        ...member,
+        status: isExpired ? 'expired' : 
+                member.endDate <= new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000) && totalRemainingDays <= 7 ? 'expiring_soon' : 'active',
+        daysRemaining: Math.max(0, totalRemainingDays),
+        activePeriods: memberPeriods.length
+      };
+    });
 
     res.json({
       members: membersWithStatus,
@@ -546,18 +701,73 @@ router.post('/:id/renew', async (req, res) => {
     const now = new Date();
     const currentEndDate = new Date(member.endDate);
     
-    // If current membership is not expired, extend from current end date
-    // If expired, start from today
-    const newStartDate = currentEndDate > now ? currentEndDate : now;
-    const newEndDate = new Date(newStartDate);
+    let newStartDate, newEndDate;
     
     // Handle Day Pass (0 months) vs regular packages
     if (membershipPackage.durationMonths === 0) {
-      // Day Pass: add 1 day and set to end of day
-      newEndDate.setDate(newEndDate.getDate() + 1);
+      // Day Pass: extend from latest membership period end date
+      const allPeriods = await prisma.membershipPeriod.findMany({
+        where: {
+          memberId: parseInt(id)
+          // Remove status filter to include today's day pass even if considered "expired"
+        },
+        orderBy: { endDate: 'desc' }
+      });
+
+      if (allPeriods.length > 0) {
+        // Find the absolute latest end date from all periods
+        const latestEndDate = allPeriods.reduce((latest, period) => {
+          const periodEnd = new Date(period.endDate);
+          return periodEnd > latest ? periodEnd : latest;
+        }, new Date(allPeriods[0].endDate));
+
+        // Start day pass from the day after the absolute latest end date
+        newStartDate = new Date(latestEndDate);
+        newStartDate.setDate(newStartDate.getDate() + 1);
+        newStartDate.setHours(0, 0, 0, 0);
+      } else {
+        // No periods found, use member's end date or today
+        newStartDate = currentEndDate > now ? new Date(currentEndDate) : new Date();
+        if (newStartDate.getTime() === currentEndDate.getTime() && currentEndDate > now) {
+          newStartDate.setDate(newStartDate.getDate() + 1);
+        }
+        newStartDate.setHours(0, 0, 0, 0);
+      }
+      
+      // Day Pass ends same day
+      newEndDate = new Date(newStartDate);
       newEndDate.setHours(23, 59, 59, 999);
     } else {
-      // Regular packages: add months
+      // Regular packages: extend from latest membership period end date (same as Day Pass logic)
+      const allPeriods = await prisma.membershipPeriod.findMany({
+        where: {
+          memberId: parseInt(id)
+        },
+        orderBy: { endDate: 'desc' }
+      });
+
+      if (allPeriods.length > 0) {
+        // Find the absolute latest end date from all periods
+        const latestEndDate = allPeriods.reduce((latest, period) => {
+          const periodEnd = new Date(period.endDate);
+          return periodEnd > latest ? periodEnd : latest;
+        }, new Date(allPeriods[0].endDate));
+
+        // Start regular package from the day after the absolute latest end date, or today if expired
+        newStartDate = latestEndDate > now ? new Date(latestEndDate) : new Date();
+        if (latestEndDate > now) {
+          newStartDate.setDate(newStartDate.getDate() + 1);
+          newStartDate.setHours(0, 0, 0, 0);
+        }
+      } else {
+        // No periods found, use member's end date or today
+        newStartDate = currentEndDate > now ? new Date(currentEndDate) : new Date();
+        if (newStartDate.getTime() === currentEndDate.getTime() && currentEndDate > now) {
+          newStartDate.setDate(newStartDate.getDate() + 1);
+        }
+      }
+      
+      newEndDate = new Date(newStartDate);
       newEndDate.setMonth(newEndDate.getMonth() + membershipPackage.durationMonths);
     }
 
@@ -599,15 +809,19 @@ router.post('/:id/renew', async (req, res) => {
         }
       });
 
-      // 3. Update member with new package and dates
+      // 3. Update member - don't override dates for Day Pass
+      const updateData = {
+        isActive: true
+      };
+
+      // Always update membership type and dates to reflect the latest renewal
+      updateData.membershipType = membershipPackage.name;
+      updateData.startDate = newStartDate;
+      updateData.endDate = newEndDate;
+
       const updatedMember = await tx.member.update({
         where: { id: parseInt(id) },
-        data: {
-          membershipType: membershipPackage.name,
-          startDate: newStartDate,
-          endDate: newEndDate,
-          isActive: true
-        }
+        data: updateData
       });
 
       return { transaction, member: updatedMember, membershipPeriod };
